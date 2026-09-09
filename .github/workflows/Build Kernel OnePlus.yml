@@ -1042,11 +1042,10 @@ jobs:
           # SukiSU Ultra配置
           set_config "CONFIG_KSU=y"
 
-          # KPM配置
-          if [ "${{ github.event.inputs.KPM }}" = "KPM" ] || [ "${{ github.event.inputs.KPM }}" = "N/A" ]; then
+          # KPM配置：仅明确选择 KPM 时启用；KPN 与 N/A 均关闭
+          if [ "${{ github.event.inputs.KPM }}" = "KPM" ]; then
             set_config "CONFIG_KPM=y"
-          fi
-          if [ "${{ github.event.inputs.KPM }}" = "KPN" ]; then
+          else
             set_config "CONFIG_KPM=n"
           fi
 
