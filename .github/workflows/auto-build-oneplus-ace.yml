@@ -744,6 +744,51 @@ jobs:
           grep -nE '^(REPO_OWNER|REPO_NAME|REPO_BRANCH|KSU_VERSION_API|KSU_VERSION_FULL|VERSION_TAG|GIT_BIN|CURL_BIN)' kernel/Makefile
           echo "::endgroup::"
 
+      - name: Patch SukiSU Ultra compatibility for kernel 5.10
+        run: |
+          KSU_DIR="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common/drivers/kernelsu"
+          test -f "$KSU_DIR/feature/kernel_umount.c"
+          test -f "$KSU_DIR/sulog/event.c"
+
+          python3 - "$KSU_DIR/feature/kernel_umount.c" <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          source = path.read_text()
+          needle = "static const struct ksu_feature_handler kernel_umount_handler = {"
+          if "static int kernel_umount_feature_set" not in source:
+              patch = """static int kernel_umount_feature_set(u64 value)
+          {
+              bool enable = value != 0;
+              ksu_kernel_umount_enabled = enable;
+              pr_info("kernel_umount: set to %d\\n", enable);
+              return 0;
+          }
+
+          """
+              source = source.replace(needle, patch + needle, 1)
+              path.write_text(source)
+              print("Added kernel_umount_feature_set compatibility shim")
+          else:
+              print("kernel_umount_feature_set already present")
+          PY
+
+          python3 - "$KSU_DIR/sulog/event.c" <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          source = path.read_text()
+          old = "#define USER_ARG_NULL user_arg_null_ptr()"
+          new = "#define USER_ARG_NULL (*user_arg_null_ptr())"
+          if old in source:
+              path.write_text(source.replace(old, new, 1))
+              print("Fixed USER_ARG_NULL type for non-SUSFS builds")
+          else:
+              print("USER_ARG_NULL compatibility fix not needed")
+          PY
+
       - name: Apply Fake Patches
         if: ${{ '-1' != '-1' }}
         run: |
