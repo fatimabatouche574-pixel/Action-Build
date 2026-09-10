@@ -95,8 +95,6 @@ jobs:
           GKI_TAG="${INPUT_GKI_TAG:-$DEFAULT_GKI_TAG}"
           echo "GKI_TAG=$GKI_TAG" >> "$GITHUB_ENV"
 
-          # The OnePlus manifest links kernel_platform/common -> kernel-5.10.
-          # Keep kernel-5.10 untouched for OEM/KMI comparison and replace ONLY the link.
           if [ -L kernel_platform/common ]; then
             unlink kernel_platform/common
           elif [ -e kernel_platform/common ]; then
@@ -140,7 +138,17 @@ jobs:
           export PATH="$TOOLBIN:$PATH"
           clang --version | head -n 1
 
-          MAKE_ARGS=(O=out ARCH=arm64 LLVM=1 LLVM_IAS=1)
+          # Android 12/5.10's Makefile derives clang --target from CROSS_COMPILE.
+          # Without this, clang targets the x86_64 Actions host and arm64 inline asm
+          # fails with "unknown register name x0/x1/x2".
+          MAKE_ARGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CLANG_TRIPLE=aarch64-linux-gnu-
+          )
           make "${MAKE_ARGS[@]}" gki_defconfig
 
           scripts/config --file out/.config -e KSU
@@ -160,19 +168,32 @@ jobs:
           grep -q '^CONFIG_MODULES=y$' out/.config
           grep -q '^CONFIG_MODVERSIONS=y$' out/.config
 
+          # Fail early if the compiler is still producing host objects.
+          printf 'int x;\n' > /tmp/ace-target.c
+          clang --target=aarch64-linux-gnu -c /tmp/ace-target.c -o /tmp/ace-target.o
+          file /tmp/ace-target.o | tee /tmp/ace-target.txt
+          grep -qi 'ARM aarch64' /tmp/ace-target.txt
+
       - name: Build pure GKI Image
         run: |
           set -euxo pipefail
           cd kernel_workspace/kernel_platform/common
           export PATH="$CLANG_TOOLBIN:$PATH"
-          MAKE_ARGS=(O=out ARCH=arm64 LLVM=1 LLVM_IAS=1)
+          MAKE_ARGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CLANG_TRIPLE=aarch64-linux-gnu-
+          )
           make -j"$(nproc)" "${MAKE_ARGS[@]}"
 
           test -s out/arch/arm64/boot/Image
           test -s out/Module.symvers
           strings out/arch/arm64/boot/Image | grep -m1 -E 'KernelSU|SukiSU' >/dev/null
 
-          RELEASE=$(make -s O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kernelrelease)
+          RELEASE=$(make -s "${MAKE_ARGS[@]}" kernelrelease)
           echo "GKI_KERNEL_RELEASE=$RELEASE" >> "$GITHUB_ENV"
           echo "Built release: $RELEASE"
           case "$RELEASE" in
