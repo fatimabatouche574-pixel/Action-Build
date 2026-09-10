@@ -397,6 +397,12 @@ jobs:
           path: ~/.apt-pkg-cache
           key: apt-cache-${{ runner.os }}-${{ github.ref_name }}-v6
 
+      - name: Disable broken Google Chrome APT source
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -iname '*google*chrome*' -o -iname '*chrome*google*' \) \
+            -print -delete || true
+
       - name: Install Dependencies
         run: |
           export APT_PACKAGES="python3 git curl libelf-dev build-essential flex bison libssl-dev libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip gawk dos2unix kmod libdw-dev elfutils dwarves"
