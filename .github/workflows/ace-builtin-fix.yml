@@ -882,7 +882,7 @@ jobs:
         run: |
           set -eu
           cd kernel_workspace/kernel_platform/common
-          test "$(git -C ../KernelSU rev-parse HEAD)" = e2912817f4e1b194e582a06e0b5eacf6a3fb7083
+          test "$(git -C "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/KernelSU" rev-parse HEAD)" = e2912817f4e1b194e582a06e0b5eacf6a3fb7083
           patch --batch --forward -p1 < "$GITHUB_WORKSPACE/patches/ace-builtin-manual.patch"
           patch --batch --forward -p1 < "$GITHUB_WORKSPACE/patches/ace-builtin-exec.patch"
           grep -n 'ksu_handle_sys_reboot(magic1' kernel/reboot.c
