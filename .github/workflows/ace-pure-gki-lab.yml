@@ -1,0 +1,291 @@
+name: OnePlus Ace Pure GKI Lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      gki_tag:
+        description: "AOSP certified GKI tag"
+        required: true
+        default: "android12-5.10-2025-05_r1"
+        type: string
+      sukisu_ref:
+        description: "SukiSU kernel setup ref"
+        required: true
+        default: "main"
+        type: string
+      package_flashable:
+        description: "Package an EXPERIMENTAL AnyKernel3 zip only if static KMI checks pass"
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches: [SukiSU-Ultra]
+    paths:
+      - ".github/workflows/ace-pure-gki-lab.yml"
+
+permissions:
+  contents: read
+
+env:
+  DEVICE_MANIFEST_REPO: "Numbersf/kernel_manifest"
+  DEVICE_MANIFEST_BRANCH: "oneplus/mt6895"
+  DEVICE_MANIFEST_FILE: "oneplus_ace_v.xml"
+  DEFAULT_GKI_TAG: "android12-5.10-2025-05_r1"
+
+jobs:
+  pure-gki-lab:
+    name: "Ace MT6895 / AOSP 5.10.236 GKI compatibility lab"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Action-Build
+        uses: actions/checkout@v4
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Install dependencies
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -iname '*google*chrome*' -o -iname '*chrome*google*' \) -delete || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates cpio curl dwarves elfutils flex \
+            gawk gcc-aarch64-linux-gnu git kmod libelf-dev liblz4-tool libncurses-dev \
+            libssl-dev libxml2-utils lz4 python3 rsync unzip xz-utils zip zlib1g-dev
+
+      - name: Install repo tool
+        run: |
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/repo"
+          chmod +x "$HOME/repo"
+          sudo mv "$HOME/repo" /usr/local/bin/repo
+          repo version
+
+      - name: Sync OnePlus Ace OEM tree and MTK vendor modules
+        run: |
+          set -euxo pipefail
+          mkdir -p kernel_workspace
+          cd kernel_workspace
+          repo init \
+            -u "https://github.com/${DEVICE_MANIFEST_REPO}.git" \
+            -b "${DEVICE_MANIFEST_BRANCH}" \
+            -m "${DEVICE_MANIFEST_FILE}" \
+            --depth=1 --no-clone-bundle --no-tags
+          repo sync -c -j"$(nproc)" --force-sync --no-clone-bundle --no-tags
+
+          test -d kernel-5.10
+          test -e kernel_platform/common
+          echo "OEM tree: $(git -C kernel-5.10 rev-parse --short HEAD)"
+          echo "OEM release: $(make -s -C kernel-5.10 kernelversion)"
+
+      - name: Replace OEM common link with certified AOSP GKI source
+        env:
+          INPUT_GKI_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.gki_tag || 'android12-5.10-2025-05_r1' }}
+        run: |
+          set -euxo pipefail
+          cd kernel_workspace
+          GKI_TAG="${INPUT_GKI_TAG:-$DEFAULT_GKI_TAG}"
+          echo "GKI_TAG=$GKI_TAG" >> "$GITHUB_ENV"
+
+          # The OnePlus manifest links kernel_platform/common -> kernel-5.10.
+          # Keep kernel-5.10 untouched for OEM/KMI comparison and replace ONLY the link.
+          if [ -L kernel_platform/common ]; then
+            unlink kernel_platform/common
+          elif [ -e kernel_platform/common ]; then
+            echo "kernel_platform/common is not a symlink; refusing destructive replacement"
+            exit 21
+          fi
+
+          git clone --depth=1 --branch "$GKI_TAG" \
+            https://android.googlesource.com/kernel/common \
+            kernel_platform/common
+
+          test "$(make -s -C kernel_platform/common kernelversion)" = "5.10.236"
+          git -C kernel_platform/common describe --tags --always
+
+      - name: Integrate SukiSU in GKI mode
+        env:
+          INPUT_SUKISU_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_ref || 'main' }}
+        run: |
+          set -euxo pipefail
+          cd kernel_workspace/kernel_platform/common
+          SUKISU_REF="${INPUT_SUKISU_REF:-main}"
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${SUKISU_REF}/kernel/setup.sh" \
+            | bash -s main
+          test -d drivers/kernelsu
+          grep -Rqs 'config KSU' drivers/kernelsu
+
+      - name: Configure certified GKI + SukiSU
+        run: |
+          set -euxo pipefail
+          cd kernel_workspace/kernel_platform/common
+
+          CLANG_BIN=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform" \
+            -path '*/clang/host/linux-x86/*/bin/clang' -type f -perm -111 | sort | tail -n 1)
+          if [ -z "$CLANG_BIN" ]; then
+            echo "No prebuilt clang found in the OnePlus manifest checkout"
+            exit 22
+          fi
+          TOOLBIN=$(dirname "$CLANG_BIN")
+          echo "$TOOLBIN" >> "$GITHUB_PATH"
+          echo "CLANG_TOOLBIN=$TOOLBIN" >> "$GITHUB_ENV"
+          export PATH="$TOOLBIN:$PATH"
+          clang --version | head -n 1
+
+          MAKE_ARGS=(O=out ARCH=arm64 LLVM=1 LLVM_IAS=1)
+          make "${MAKE_ARGS[@]}" gki_defconfig
+
+          scripts/config --file out/.config -e KSU
+          scripts/config --file out/.config -e KPROBES
+          scripts/config --file out/.config -e KPROBE_EVENTS
+          scripts/config --file out/.config -e MODULES
+          scripts/config --file out/.config -e MODVERSIONS
+          scripts/config --file out/.config -e LTO_CLANG
+          scripts/config --file out/.config -e LTO_CLANG_THIN
+          scripts/config --file out/.config -d LTO_CLANG_NONE
+          scripts/config --file out/.config -d LTO_CLANG_FULL
+
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          grep -q '^CONFIG_KSU=y$' out/.config
+          grep -q '^CONFIG_KPROBES=y$' out/.config
+          grep -q '^CONFIG_MODULES=y$' out/.config
+          grep -q '^CONFIG_MODVERSIONS=y$' out/.config
+
+      - name: Build pure GKI Image
+        run: |
+          set -euxo pipefail
+          cd kernel_workspace/kernel_platform/common
+          export PATH="$CLANG_TOOLBIN:$PATH"
+          MAKE_ARGS=(O=out ARCH=arm64 LLVM=1 LLVM_IAS=1)
+          make -j"$(nproc)" "${MAKE_ARGS[@]}"
+
+          test -s out/arch/arm64/boot/Image
+          test -s out/Module.symvers
+          strings out/arch/arm64/boot/Image | grep -m1 -E 'KernelSU|SukiSU' >/dev/null
+
+          RELEASE=$(make -s O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kernelrelease)
+          echo "GKI_KERNEL_RELEASE=$RELEASE" >> "$GITHUB_ENV"
+          echo "Built release: $RELEASE"
+          case "$RELEASE" in
+            5.10.236*) ;;
+            *) echo "Unexpected kernel release: $RELEASE"; exit 23 ;;
+          esac
+
+      - name: Audit OnePlus/MTK KMI symbol compatibility
+        id: kmi
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/kernel_workspace"
+          OEM="$ROOT/kernel-5.10/android"
+          GKI="$ROOT/kernel_platform/common/android"
+          OUT="$GITHUB_WORKSPACE/gki-audit"
+          mkdir -p "$OUT"
+
+          normalize() {
+            grep -Ev '^[[:space:]]*(#|$)' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort -u
+          }
+
+          : > "$OUT/oem-required-symbols.txt"
+          total_missing_lists=0
+          for list in abi_gki_aarch64_mtk abi_gki_aarch64_oplus; do
+            if [ -f "$OEM/$list" ] && [ -f "$GKI/$list" ]; then
+              normalize "$OEM/$list" > "$OUT/oem-$list.txt"
+              normalize "$GKI/$list" > "$OUT/gki-$list.txt"
+              comm -23 "$OUT/oem-$list.txt" "$OUT/gki-$list.txt" > "$OUT/missing-from-gki-$list.txt"
+              cat "$OUT/oem-$list.txt" >> "$OUT/oem-required-symbols.txt"
+              count=$(wc -l < "$OUT/missing-from-gki-$list.txt")
+              echo "$list missing from certified GKI list: $count"
+              total_missing_lists=$((total_missing_lists + count))
+            else
+              echo "Missing KMI list pair for $list" | tee -a "$OUT/warnings.txt"
+              total_missing_lists=$((total_missing_lists + 100000))
+            fi
+          done
+
+          sort -u -o "$OUT/oem-required-symbols.txt" "$OUT/oem-required-symbols.txt"
+          awk '{print $2}' "$ROOT/kernel_platform/common/out/Module.symvers" | sort -u > "$OUT/gki-exported-symbols.txt"
+          comm -23 "$OUT/oem-required-symbols.txt" "$OUT/gki-exported-symbols.txt" > "$OUT/oem-kmi-not-exported-by-built-gki.txt"
+          missing_exports=$(wc -l < "$OUT/oem-kmi-not-exported-by-built-gki.txt")
+
+          sha256sum "$ROOT/kernel_platform/common/out/arch/arm64/boot/Image" > "$OUT/Image.sha256"
+          cp "$ROOT/kernel_platform/common/out/.config" "$OUT/gki.config"
+          cp "$ROOT/kernel_platform/common/out/Module.symvers" "$OUT/Module.symvers"
+
+          static_ok=false
+          if [ "$total_missing_lists" -eq 0 ] && [ "$missing_exports" -eq 0 ]; then
+            static_ok=true
+          fi
+
+          {
+            echo "# OnePlus Ace Pure GKI static compatibility report"
+            echo
+            echo "- Device manifest: ${DEVICE_MANIFEST_FILE} (${DEVICE_MANIFEST_BRANCH})"
+            echo "- Certified GKI source: ${GKI_TAG}"
+            echo "- Built kernel release: ${GKI_KERNEL_RELEASE}"
+            echo "- SukiSU: GKI/main integration"
+            echo "- OEM MTK/Oplus KMI symbols absent from certified GKI lists: ${total_missing_lists}"
+            echo "- OEM MTK/Oplus KMI symbols not exported by this built GKI: ${missing_exports}"
+            echo "- Static gate: ${static_ok}"
+            echo
+            echo "IMPORTANT: static_ok=true is NOT proof that this kernel boots on OnePlus Ace."
+            echo "DT/vendor_boot/vendor_dlkm/runtime module behavior still has to be tested separately."
+          } > "$OUT/REPORT.md"
+
+          echo "static_ok=$static_ok" >> "$GITHUB_OUTPUT"
+          echo "missing_lists=$total_missing_lists" >> "$GITHUB_OUTPUT"
+          echo "missing_exports=$missing_exports" >> "$GITHUB_OUTPUT"
+          cat "$OUT/REPORT.md"
+
+      - name: Stage raw GKI artifacts
+        run: |
+          set -euxo pipefail
+          mkdir -p pure-gki-output
+          cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image pure-gki-output/Image
+          cp -r gki-audit pure-gki-output/audit
+          cat > pure-gki-output/README-FIRST.txt <<EOF
+          OnePlus Ace MT6895 PURE GKI LAB artifact
+          Source: ${GKI_TAG}
+          Release: ${GKI_KERNEL_RELEASE}
+
+          This is a clean AOSP GKI core with SukiSU integrated in GKI mode.
+          It is NOT the previous OnePlus OEM/Built-in kernel.
+          Raw Image is uploaded for analysis first; do not blindly flash it.
+          Read audit/REPORT.md before any device-side test.
+          EOF
+
+      - name: Package EXPERIMENTAL AnyKernel3 zip
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.package_flashable && steps.kmi.outputs.static_ok == 'true' }}
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 https://github.com/Numbersf/AnyKernel3 pure-gki-anykernel
+          rm -rf pure-gki-anykernel/.git
+          cp pure-gki-output/Image pure-gki-anykernel/Image
+          cp gki-audit/REPORT.md pure-gki-anykernel/PURE-GKI-WARNING.md
+          cd pure-gki-anykernel
+          zip -r9 ../Ace-PURE-GKI-5.10.236-SukiSU-EXPERIMENTAL.zip . -x '*.git*'
+
+      - name: Explain why flashable package was blocked
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.package_flashable && steps.kmi.outputs.static_ok != 'true' }}
+        run: |
+          echo "::warning::Flashable package blocked: static KMI gate did not pass."
+          echo "Missing list symbols: ${{ steps.kmi.outputs.missing_lists }}"
+          echo "Missing exported symbols: ${{ steps.kmi.outputs.missing_exports }}"
+
+      - name: Upload Pure GKI lab output
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ace-PureGKI-Lab-${{ env.GKI_TAG }}
+          path: |
+            pure-gki-output/
+            Ace-PURE-GKI-5.10.236-SukiSU-EXPERIMENTAL.zip
+          if-no-files-found: warn
+          retention-days: 14
