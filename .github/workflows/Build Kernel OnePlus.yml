@@ -874,6 +874,18 @@ jobs:
           source $REJ_CHECKER
           check_rejects .
 
+      - name: Wire OnePlus Ace builtin hooks
+        if: ${{ github.event.inputs.FILE == 'oneplus_ace_v' && github.event.inputs.SUSFS_META == '-1' }}
+        run: |
+          set -eu
+          cd kernel_workspace/kernel_platform/common
+          test "$(git -C ../KernelSU rev-parse HEAD)" = e2912817f4e1b194e582a06e0b5eacf6a3fb7083
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/patches/ace-builtin-manual.patch"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/patches/ace-builtin-exec.patch"
+          grep -n 'ksu_handle_sys_reboot(magic1' kernel/reboot.c
+          grep -n 'ksu_handle_execveat(&fd' fs/exec.c
+          ! find fs kernel drivers/input -name '*.rej' -print | grep .
+          
       - name: Apply BBRv3
         if: ${{ github.event.inputs.CCM == 'true' && env.KMI != 'android16-6.12' }}
         run: |
