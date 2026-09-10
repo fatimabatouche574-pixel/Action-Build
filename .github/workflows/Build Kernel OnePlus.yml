@@ -880,8 +880,10 @@ jobs:
           set -eu
           cd kernel_workspace/kernel_platform/common
           test "$(git -C "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/KernelSU" rev-parse HEAD)" = e2912817f4e1b194e582a06e0b5eacf6a3fb7083
-          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/patches/ace-builtin-manual.patch"
-          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/patches/ace-builtin-exec.patch"
+          curl --fail --location --retry 3 "https://raw.githubusercontent.com/fatimabatouche574-pixel/Action-Build/ccb3afce7a232d2d9cc5c471f5529a34fbf57435/patches/ace-builtin-manual.patch" -o "/tmp/ace-builtin-manual.patch"
+          patch --batch --forward -p1 < "/tmp/ace-builtin-manual.patch"
+          curl --fail --location --retry 3 "https://raw.githubusercontent.com/fatimabatouche574-pixel/Action-Build/ccb3afce7a232d2d9cc5c471f5529a34fbf57435/patches/ace-builtin-exec.patch" -o "/tmp/ace-builtin-exec.patch"
+          patch --batch --forward -p1 < "/tmp/ace-builtin-exec.patch"
           grep -n 'ksu_handle_sys_reboot(magic1' kernel/reboot.c
           grep -n 'ksu_handle_execveat(&fd' fs/exec.c
           ! find fs kernel drivers/input -name '*.rej' -print | grep .
