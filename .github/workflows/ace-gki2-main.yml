@@ -26,15 +26,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
+      - name: Check runner space
+        run: |
+          df -h
+          free -h
 
       - name: Install dependencies
         run: |
@@ -63,7 +58,7 @@ jobs:
             -b "${MANIFEST_BRANCH}" \
             -m "${MANIFEST_FILE}" \
             --depth=1 --no-clone-bundle --no-tags
-          repo sync -c -j"$(nproc)" --force-sync --no-clone-bundle --no-tags
+          repo sync -c -j4 --force-sync --no-clone-bundle --no-tags
 
           test -d kernel-5.10
           test -e kernel_platform/common
@@ -180,7 +175,6 @@ jobs:
           grep -q '^CONFIG_KPROBES=y$' out/.config
           grep -q '^CONFIG_MODULES=y$' out/.config
           grep -q '^CONFIG_MODVERSIONS=y$' out/.config
-          grep -q '^# CONFIG_KPM is not set$' out/.config || true
 
       - name: Build OnePlus Ace GKI2.0 kernel
         run: |
@@ -197,7 +191,7 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu-
           )
 
-          make -j"$(nproc)" "${MAKE_ARGS[@]}"
+          make -j4 "${MAKE_ARGS[@]}"
 
           IMAGE=out/arch/arm64/boot/Image
           test -s "$IMAGE"
