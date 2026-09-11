@@ -1,0 +1,61 @@
+name: OnePlus Ace GKI2.0 SukiSU Trigger
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [SukiSU-Ultra]
+    paths:
+      - ".github/workflows/ace-gki2-trigger.yml"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch Ace GKI2.0 build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch OnePlus Ace GKI2.0 build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/Build%20Kernel%20OnePlus.yml/dispatches" \
+            --input - <<'JSON'
+          {
+            "ref": "SukiSU-Ultra",
+            "inputs": {
+              "FILE": "oneplus_ace_v",
+              "SUSFS_CI": "N/A",
+              "KPM": "N/A",
+              "SUSFS_META": "-1",
+              "DYNAMIC_REPO": "Numbersf",
+              "BUILD_TIME": "F",
+              "KSU_META": "main/main/Numbersf/",
+              "LZ4_UPDATE": "false",
+              "ZRAM": "0/lz4kd/8589934592",
+              "SUFFIX": "-Ace-GKI",
+              "RESUBLEVEL": "",
+              "FAST_BUILD": "true",
+              "LSM_BBG": "false",
+              "NETFILTER": "true",
+              "CCM": "true",
+              "UNICODE_BYPASS": "false",
+              "SCHED_HMBIRD": "false",
+              "DROID_SPACES": "false",
+              "RE_KERNEL": "false",
+              "SUSFS_DEV": "false",
+              "SPACE_NOCLEAN": "false",
+              "BUILD_NOCACHE": "false"
+            }
+          }
+          JSON
+
+          echo "Dispatched Build Kernel OnePlus.yml for OnePlus Ace"
+          echo "SukiSU branch: main (KPROBES/GKI path)"
+          echo "Kernel source: OnePlus MT6895 GKI2.0 tree"
+          echo "Suffix: -Ace-GKI"
