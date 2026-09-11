@@ -1,0 +1,251 @@
+name: OnePlus Ace GKI2.0 SukiSU Main
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [SukiSU-Ultra]
+    paths:
+      - ".github/workflows/ace-gki2-main.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: "OnePlus Ace / OEM GKI2.0 / SukiSU main"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      MANIFEST_REPO: Numbersf/kernel_manifest
+      MANIFEST_BRANCH: oneplus/mt6895
+      MANIFEST_FILE: oneplus_ace_v.xml
+      SUKISU_COMMIT: 9fbe8fe8ca90c62c259c5894bf96d02ac31209b9
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Install dependencies
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -iname '*google*chrome*' -o -iname '*chrome*google*' \) -delete || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates cpio curl dwarves elfutils flex \
+            gawk gcc-aarch64-linux-gnu git kmod libelf-dev liblz4-tool libncurses-dev \
+            libssl-dev libxml2-utils lz4 python3 rsync unzip xz-utils zip zlib1g-dev
+
+      - name: Install repo tool
+        run: |
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/repo"
+          chmod +x "$HOME/repo"
+          sudo mv "$HOME/repo" /usr/local/bin/repo
+          repo version
+
+      - name: Sync OnePlus Ace OEM GKI2.0 source
+        run: |
+          set -euxo pipefail
+          mkdir -p kernel_workspace
+          cd kernel_workspace
+          repo init \
+            -u "https://github.com/${MANIFEST_REPO}.git" \
+            -b "${MANIFEST_BRANCH}" \
+            -m "${MANIFEST_FILE}" \
+            --depth=1 --no-clone-bundle --no-tags
+          repo sync -c -j"$(nproc)" --force-sync --no-clone-bundle --no-tags
+
+          test -d kernel-5.10
+          test -e kernel_platform/common
+          test "$(make -s -C kernel_platform/common kernelversion)" = "5.10.236"
+          grep -q '^CONFIG_KPROBES=y$' kernel_platform/common/arch/arm64/configs/gki_defconfig
+          grep -q '^CONFIG_MODVERSIONS=y$' kernel_platform/common/arch/arm64/configs/gki_defconfig
+
+          echo "OEM source: $(git -C kernel-5.10 rev-parse --short HEAD)"
+          echo "OEM release: $(make -s -C kernel-5.10 kernelversion)"
+          echo "common resolves to: $(readlink -f kernel_platform/common || realpath kernel_platform/common)"
+
+      - name: Integrate SukiSU main GKI path
+        run: |
+          set -euxo pipefail
+          cd kernel_workspace/kernel_platform
+          curl -LSs \
+            "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
+            | bash -s "$SUKISU_COMMIT"
+
+          test -d KernelSU
+          test "$(git -C KernelSU rev-parse HEAD)" = "$SUKISU_COMMIT"
+          test -e common/drivers/kernelsu
+          grep -Rqs 'depends on KPROBES' common/drivers/kernelsu/Kconfig
+
+      - name: Apply SukiSU 5.10 compatibility fixes
+        run: |
+          set -euxo pipefail
+          KSU_DIR="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common/drivers/kernelsu"
+          test -f "$KSU_DIR/feature/kernel_umount.c"
+          test -f "$KSU_DIR/sulog/event.c"
+
+          python3 - "$KSU_DIR/feature/kernel_umount.c" <<'PY'
+          import pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          source = path.read_text()
+          needle = "static const struct ksu_feature_handler kernel_umount_handler = {"
+          if "static int kernel_umount_feature_set" not in source:
+              patch = """static int kernel_umount_feature_set(u64 value)
+          {
+              bool enable = value != 0;
+              ksu_kernel_umount_enabled = enable;
+              pr_info("kernel_umount: set to %d\\n", enable);
+              return 0;
+          }
+
+          """
+              if needle not in source:
+                  raise SystemExit("kernel_umount handler anchor not found")
+              path.write_text(source.replace(needle, patch + needle, 1))
+              print("Added kernel_umount_feature_set compatibility shim")
+          else:
+              print("kernel_umount_feature_set already present")
+          PY
+
+          python3 - "$KSU_DIR/sulog/event.c" <<'PY'
+          import pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          source = path.read_text()
+          old = "#define USER_ARG_NULL user_arg_null_ptr()"
+          new = "#define USER_ARG_NULL (*user_arg_null_ptr())"
+          if old in source:
+              path.write_text(source.replace(old, new, 1))
+              print("Fixed USER_ARG_NULL type for Android 12 / 5.10")
+          else:
+              print("USER_ARG_NULL compatibility fix not needed")
+          PY
+
+      - name: Disable MTK 5.10 GPUEB in core build
+        run: |
+          set -euxo pipefail
+          sed -i '/obj-y.*gpueb/d' kernel_workspace/kernel-5.10/drivers/gpu/mediatek/Makefile
+
+      - name: Configure GKI2.0 + SukiSU main
+        run: |
+          set -euxo pipefail
+          cd kernel_workspace/kernel_platform/common
+
+          CLANG_BIN=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform" \
+            -path '*/clang/host/linux-x86/*/bin/clang' -type f -perm -111 | sort | tail -n 1)
+          test -n "$CLANG_BIN"
+          TOOLBIN=$(dirname "$CLANG_BIN")
+          echo "$TOOLBIN" >> "$GITHUB_PATH"
+          echo "CLANG_TOOLBIN=$TOOLBIN" >> "$GITHUB_ENV"
+          export PATH="$TOOLBIN:$PATH"
+
+          clang --version | head -n 1
+          echo | clang --target=aarch64-linux-gnu -dM -E - | grep -q '__aarch64__'
+
+          MAKE_ARGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CLANG_TRIPLE=aarch64-linux-gnu-
+          )
+
+          make "${MAKE_ARGS[@]}" gki_defconfig
+          scripts/config --file out/.config -e KSU
+          scripts/config --file out/.config -e KPROBES
+          scripts/config --file out/.config -e MODULES
+          scripts/config --file out/.config -e MODVERSIONS
+          scripts/config --file out/.config -d KPM
+          scripts/config --file out/.config -d KSU_SUSFS
+          scripts/config --file out/.config -e LTO_CLANG
+          scripts/config --file out/.config -e LTO_CLANG_THIN
+          scripts/config --file out/.config -d LTO_CLANG_NONE
+          scripts/config --file out/.config -d LTO_CLANG_FULL
+          scripts/config --file out/.config --set-str LOCALVERSION "-Ace-GKI"
+          scripts/config --file out/.config -d LOCALVERSION_AUTO
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          grep -q '^CONFIG_KSU=y$' out/.config
+          grep -q '^CONFIG_KPROBES=y$' out/.config
+          grep -q '^CONFIG_MODULES=y$' out/.config
+          grep -q '^CONFIG_MODVERSIONS=y$' out/.config
+          grep -q '^# CONFIG_KPM is not set$' out/.config || true
+
+      - name: Build OnePlus Ace GKI2.0 kernel
+        run: |
+          set -euxo pipefail
+          cd kernel_workspace/kernel_platform/common
+          export PATH="$CLANG_TOOLBIN:$PATH"
+
+          MAKE_ARGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CLANG_TRIPLE=aarch64-linux-gnu-
+          )
+
+          make -j"$(nproc)" "${MAKE_ARGS[@]}"
+
+          IMAGE=out/arch/arm64/boot/Image
+          test -s "$IMAGE"
+          test -s out/Module.symvers
+
+          RELEASE=$(make -s "${MAKE_ARGS[@]}" kernelrelease)
+          echo "KERNEL_RELEASE=$RELEASE" >> "$GITHUB_ENV"
+          echo "Built kernel release: $RELEASE"
+          case "$RELEASE" in
+            5.10.236*Ace-GKI*) ;;
+            *) echo "Unexpected release string: $RELEASE"; exit 23 ;;
+          esac
+
+          strings "$IMAGE" | grep -m1 -E 'KernelSU|SukiSU' >/dev/null
+          sha256sum "$IMAGE" | tee "$GITHUB_WORKSPACE/Image.sha256"
+
+      - name: Package flashable AnyKernel3
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 https://github.com/Numbersf/AnyKernel3 Ace-GKI-AnyKernel3
+          rm -rf Ace-GKI-AnyKernel3/.git
+          cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image Ace-GKI-AnyKernel3/Image
+          cp Image.sha256 Ace-GKI-AnyKernel3/Image.sha256
+
+          cat > Ace-GKI-AnyKernel3/ACE-GKI-README.txt <<EOF
+          OnePlus Ace MT6895 GKI2.0 + SukiSU main
+          Kernel source: OnePlusOSS android_kernel_5.10_oneplus_mt6895
+          Source branch: oneplus/mt6895_v_15.0.0_ace
+          KMI: android12-5.10
+          Kernel release: ${KERNEL_RELEASE}
+          SukiSU commit: ${SUKISU_COMMIT}
+          Integration: SukiSU main / KPROBES
+          SUSFS: disabled
+          KPM: disabled
+
+          This package keeps the OnePlus/MTK OEM GKI2.0 kernel and vendor compatibility.
+          It does NOT replace the core with the pure AOSP GKI lab Image.
+          EOF
+
+          cd Ace-GKI-AnyKernel3
+          zip -r9 "../Ace-GKI2.0-5.10.236-SukiSU-main.zip" . -x '*.git*'
+
+      - name: Upload flashable GKI2.0 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ace-GKI2.0-5.10.236-SukiSU-main
+          path: |
+            Ace-GKI2.0-5.10.236-SukiSU-main.zip
+            Image.sha256
+          if-no-files-found: error
+          retention-days: 14
